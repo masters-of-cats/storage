@@ -15,7 +15,9 @@ import (
 	"syscall"
 
 	"github.com/Sirupsen/logrus"
+	units "github.com/docker/go-units"
 
+	quotapkg "code.cloudfoundry.org/grootfs/store/filesystems/overlayxfs/quota"
 	"github.com/containers/storage/drivers"
 	"github.com/containers/storage/pkg/archive"
 	"github.com/containers/storage/pkg/chrootarchive"
@@ -82,9 +84,13 @@ type Driver struct {
 	uidMaps []idtools.IDMap
 	gidMaps []idtools.IDMap
 	ctr     *graphdriver.RefCounter
+	options overlayOptions
 }
 
-var backingFs = "<unknown>"
+var (
+	backingFs     = "<unknown>"
+	userDiskQuota = false
+)
 
 func init() {
 	graphdriver.Register(driverName, Init)
@@ -148,6 +154,7 @@ func Init(home string, options []string, uidMaps, gidMaps []idtools.IDMap) (grap
 		uidMaps: uidMaps,
 		gidMaps: gidMaps,
 		ctr:     graphdriver.NewRefCounter(graphdriver.NewFsChecker(graphdriver.FsMagicOverlay)),
+		options: opts,
 	}
 
 	return d, nil
@@ -155,24 +162,40 @@ func Init(home string, options []string, uidMaps, gidMaps []idtools.IDMap) (grap
 
 type overlayOptions struct {
 	overrideKernelCheck bool
+	minSpace            uint64
+	size                uint64
 }
 
-func parseOptions(options []string) (*overlayOptions, error) {
-	o := &overlayOptions{}
+func parseOptions(options []string) (overlayOptions, error) {
+	o := overlayOptions{}
 	for _, option := range options {
 		key, val, err := parsers.ParseKeyValueOpt(option)
 		if err != nil {
-			return nil, err
+			return overlayOptions{}, err
 		}
 		key = strings.ToLower(key)
 		switch key {
 		case "overlay2.override_kernel_check":
 			o.overrideKernelCheck, err = strconv.ParseBool(val)
 			if err != nil {
-				return nil, err
+				return overlayOptions{}, err
 			}
+		case "overlay2.min_space":
+			minSpace, err := units.RAMInBytes(val)
+			if err != nil {
+				return o, err
+			}
+			userDiskQuota = true
+			o.minSpace = uint64(minSpace)
+		case "overlay2.size":
+			size, err := units.RAMInBytes(val)
+			if err != nil {
+				return o, err
+			}
+			userDiskQuota = true
+			o.size = uint64(size)
 		default:
-			return nil, fmt.Errorf("overlay2: Unknown option %s\n", key)
+			return overlayOptions{}, fmt.Errorf("overlay2: Unknown option %s\n", key)
 		}
 	}
 	return o, nil
@@ -276,6 +299,12 @@ func (d *Driver) Create(id, parent, mountLabel string, storageOpt map[string]str
 			os.RemoveAll(dir)
 		}
 	}()
+
+	if userDiskQuota {
+		if err := d.setStorageSize(dir); err != nil {
+			return err
+		}
+	}
 
 	if err := idtools.MkdirAs(path.Join(dir, "diff"), 0755, rootUID, rootGID); err != nil {
 		return err
@@ -431,6 +460,43 @@ func (d *Driver) Get(id string, mountLabel string) (s string, err error) {
 	}
 
 	return mergedDir, nil
+}
+
+// Nice output messages :)
+//
+// Set overlay storage size
+func (d *Driver) setStorageSize(dir string) error {
+	if d.options.size <= 0 {
+		return fmt.Errorf("FORBIDDEN", units.HumanSize(float64(d.options.size)))
+	}
+	if d.options.minSpace > 0 && d.options.size < d.options.minSpace {
+		return fmt.Errorf("that's idiotic. no storage quota for you", units.HumanSize(float64(d.options.minSpace)))
+	}
+
+	// limit some storage
+	if err := d.applyDiskLimit(dir); err != nil {
+		return fmt.Errorf("applying disk limits: %s", err)
+	}
+
+	return nil
+}
+
+func (d *Driver) applyDiskLimit(dir string) error {
+	diskLimit := d.options.size
+
+	quotaControl, err := quotapkg.NewControl(d.home)
+	if err != nil {
+		return fmt.Errorf("creating xfs quota control %s: %s", err, dir)
+	}
+
+	quota := quotapkg.Quota{
+		Size: uint64(diskLimit),
+	}
+	if err := quotaControl.SetQuota(dir, quota); err != nil {
+		return fmt.Errorf("setting quota to %s: %s", err, dir)
+	}
+
+	return nil
 }
 
 // Put unmounts the mount path created for the give id.
