@@ -74,6 +74,9 @@ type ProtoDriver interface {
 	// held by the driver, e.g., unmounting all layered filesystems
 	// known to this driver.
 	Cleanup() error
+	// GetQuotaUsage returns disk usage on a mounted filesystem layer
+	// which has a quota limit applied
+	GetQuotaUsage(id string) (map[string]int64, error)
 }
 
 // Driver is the interface for layered/snapshot file system drivers.

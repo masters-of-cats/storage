@@ -4,6 +4,7 @@ package overlay2
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -497,6 +498,56 @@ func (d *Driver) applyDiskLimit(dir string) error {
 	}
 
 	return nil
+}
+
+func (d *Driver) GetQuotaUsage(id string) (map[string]int64, error) {
+	dir := d.dir(id)
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return map[string]int64{}, fmt.Errorf("image path (%s) doesn't exist, %s", dir, err)
+	}
+
+	projectID, err := quotapkg.GetProjectID(dir)
+	if err != nil {
+		return map[string]int64{}, fmt.Errorf("fetching project id for %s, %s", dir, err)
+	}
+
+	var exclusiveSize int64
+	if projectID != 0 {
+		exclusiveSize, err = d.listQuotaUsage(projectID)
+		if err != nil {
+			return map[string]int64{}, fmt.Errorf("listing quota usage %s, %s", dir, err)
+		}
+	}
+
+	info := map[string]int64{
+		"exclusive_bytes_used": exclusiveSize,
+	}
+	return info, nil
+}
+
+func (d *Driver) listQuotaUsage(projectID uint32) (int64, error) {
+	quotaCmd := exec.Command("xfs_quota", "-x", "-c", fmt.Sprintf("quota -N -p %d", projectID), d.home)
+	stdoutBuffer := bytes.NewBuffer([]byte{})
+	stderrBuffer := bytes.NewBuffer([]byte{})
+	quotaCmd.Stdout = stdoutBuffer
+	quotaCmd.Stderr = stdoutBuffer
+	if err := quotaCmd.Run(); err != nil {
+		return 0, fmt.Errorf("failed to fetch xfs quota: %s, %s", stderrBuffer.String(), err)
+	}
+
+	output := stdoutBuffer.String()
+	parsedOutput := strings.Fields(output)
+	if len(parsedOutput) != 7 {
+		return 0, fmt.Errorf("quota usage output not as expected: %s", output)
+	}
+
+	usedBlocks, err := strconv.ParseInt(parsedOutput[1], 10, 64)
+	if err != nil {
+		return 0, err
+	}
+
+	// xfs_quota output returns 1K-block values, so we need to multiply it for 1024
+	return usedBlocks * 1024, nil
 }
 
 // Put unmounts the mount path created for the give id.
