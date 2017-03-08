@@ -393,6 +393,36 @@ func (d *Driver) getLowerDirs(id string) ([]string, error) {
 	return lowersArray, nil
 }
 
+func (d *Driver) GetVolumeSize(id string) (int64, error) {
+	lowerDirs, err := d.getLowerDirs(id)
+	if err != nil {
+		return 0, err
+	}
+	var volumeSize int64
+	for _, lower := range lowerDirs {
+		lowerSize, err := d.duUsage(lower)
+		if err != nil {
+			return 0, err
+		}
+		volumeSize += lowerSize
+	}
+	return volumeSize, nil
+}
+
+func (d *Driver) duUsage(path string) (int64, error) {
+	cmd := exec.Command("du", "-bs", path)
+	stdoutBuffer := bytes.NewBuffer([]byte{})
+	stderrBuffer := bytes.NewBuffer([]byte{})
+	cmd.Stdout = stdoutBuffer
+	cmd.Stderr = stdoutBuffer
+	if err := cmd.Run(); err != nil {
+		return 0, fmt.Errorf("du failed: %s, %s", stderrBuffer.String(), err)
+	}
+
+	usageString := strings.Split(stdoutBuffer.String(), "\t")[0]
+	return strconv.ParseInt(usageString, 10, 64)
+}
+
 // Remove cleans the directories that are created for this id.
 func (d *Driver) Remove(id string) error {
 	dir := d.dir(id)
@@ -500,29 +530,26 @@ func (d *Driver) applyDiskLimit(dir string) error {
 	return nil
 }
 
-func (d *Driver) GetQuotaUsage(id string) (map[string]int64, error) {
+func (d *Driver) GetQuotaUsage(id string) (int64, error) {
 	dir := d.dir(id)
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		return map[string]int64{}, fmt.Errorf("image path (%s) doesn't exist, %s", dir, err)
+		return 0, fmt.Errorf("image path (%s) doesn't exist, %s", dir, err)
 	}
 
 	projectID, err := quotapkg.GetProjectID(dir)
 	if err != nil {
-		return map[string]int64{}, fmt.Errorf("fetching project id for %s, %s", dir, err)
+		return 0, fmt.Errorf("fetching project id for %s, %s", dir, err)
 	}
 
 	var exclusiveSize int64
 	if projectID != 0 {
 		exclusiveSize, err = d.listQuotaUsage(projectID)
 		if err != nil {
-			return map[string]int64{}, fmt.Errorf("listing quota usage %s, %s", dir, err)
+			return 0, fmt.Errorf("listing quota usage %s, %s", dir, err)
 		}
 	}
 
-	info := map[string]int64{
-		"exclusive_bytes_used": exclusiveSize,
-	}
-	return info, nil
+	return exclusiveSize, nil
 }
 
 func (d *Driver) listQuotaUsage(projectID uint32) (int64, error) {
